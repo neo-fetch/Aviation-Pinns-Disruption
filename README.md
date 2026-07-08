@@ -87,6 +87,41 @@ Outputs land in `outputs/`:
 - `confusion.png` — 4-class severity confusion matrix
 - `risk_scores.csv` — the AnyLogic-ready risk export
 
+## Results (committed `outputs/`, seed 42)
+
+Binary disruption detection = predicting **moderate-or-worse** (>=10%
+capacity reduction) node-weeks on the held-out final ~20% of the timeline
+(~4% positive base rate):
+
+| Horizon | PI-GNN F1 | Baseline F1 | PI-GNN AUC | Baseline AUC |
+|---|---|---|---|---|
+| 1 week | **0.75** | 0.65 | **0.95** | 0.93 |
+| 2 weeks | **0.63** | 0.57 | **0.92** | 0.90 |
+| 4 weeks | 0.34 | 0.42 | **0.84** | 0.83 |
+| 8 weeks | 0.07 | 0.05 | 0.66 | 0.66 |
+
+Physics consistency of the models' predicted network state (test set):
+
+| | PI-GNN | Baseline GNN |
+|---|---|---|
+| Flow-conservation residual (MSE) | **0.015** | 3.59 (~240x worse) |
+| Capacity violations (% of predictions) | **6.2%** | 7.1% |
+
+The physics-consistency gap is the paper's core value proposition realized:
+the baseline's internal picture of the network routinely creates or destroys
+material, while the PI-GNN's predictions stay physically plausible — which is
+what makes them trustworthy inputs for downstream decisions. Long-horizon
+raw-onset prediction (8w) is weak for both models by design: episode onsets
+beyond the precursor window are exogenous shocks. Note that results on a
+single synthetic seed carry meaningful run-to-run variance (the
+data-efficiency study in `metrics.json` reports mean +/- std over 3 seeds,
+where the two models are statistically comparable on F1).
+
+The mitigation counterfactuals in `metrics.json` behave sensibly: buffering
+an embargoed raw-material supplier barely changes its own risk (you cannot
+inventory your way out of an export restriction) but measurably reduces
+predicted downstream spillover risk.
+
 ## Repository layout
 
 ```
