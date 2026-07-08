@@ -33,15 +33,15 @@ LSTM_HIDDEN = 96
 N_CLASSES = 4                # none / minor / moderate / major
 
 # ------------------------------------------------------------------ training
-EPOCHS = 120
+EPOCHS = 150
 WARMUP_EPOCHS = 30           # prediction-only pretraining (paper §3.4)
 LR = 2e-3
 WEIGHT_DECAY = 1e-5
 BATCH_WINDOWS = 16           # temporal windows per mini-batch
 
 # Physics constraint weights (final values; curriculum ramps toward these)
-LAMBDA_FLOW = 0.05
-LAMBDA_CAPACITY = 0.05
+LAMBDA_FLOW = 0.02
+LAMBDA_CAPACITY = 0.2
 LAMBDA_LEAD = 0.02
 CURRICULUM_TAU = 20.0        # lambda(e) = lambda_final * (1 - exp(-(e - warmup)/tau))
 

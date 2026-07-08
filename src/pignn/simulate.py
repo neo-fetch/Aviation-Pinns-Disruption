@@ -35,6 +35,22 @@ class Episode:
     start: int
     duration: int
     magnitude: float   # fraction of capacity lost / lead-time multiplier
+    pre_weeks: int = 5   # precursor ramp: warning signals build up gradually
+    recovery_weeks: int = 3  # exponential recovery tail after the episode
+
+    def intensity(self, t: int) -> float:
+        """Fraction of full magnitude active at week t. Disruptions announce
+        themselves through a precursor ramp (the paper's premise that warning
+        signals accumulate over weeks) and fade through a recovery tail."""
+        if self.start <= t < self.start + self.duration:
+            return 1.0
+        if self.start - self.pre_weeks <= t < self.start:
+            return 0.35 * (t - (self.start - self.pre_weeks)) / self.pre_weeks
+        end = self.start + self.duration
+        if end <= t < end + self.recovery_weeks * 3:
+            import math
+            return math.exp(-(t - end) / self.recovery_weeks)
+        return 0.0
 
 
 @dataclass
@@ -141,17 +157,18 @@ def simulate(G: nx.DiGraph, n_weeks: int, n_episodes: int,
         lead_extra = np.zeros(E, dtype=np.int64)
         demand_mult = np.ones(N)
         for ep in episodes:
-            if not (ep.start <= t < ep.start + ep.duration):
+            inten = ep.intensity(t)
+            if inten <= 0.0:
                 continue
             if ep.kind in ("supplier_outage", "capacity_cut", "export_restriction"):
                 loss = ep.magnitude if ep.kind != "capacity_cut" else ep.magnitude * 0.6
-                cap_mult[ep.node] = min(cap_mult[ep.node], 1.0 - loss)
+                cap_mult[ep.node] = min(cap_mult[ep.node], 1.0 - loss * inten)
             elif ep.kind == "leadtime_spike":
                 for e in in_edges[ep.node] + out_edges[ep.node]:
                     lead_extra[e] = max(lead_extra[e],
-                                        int(np.ceil(ep.magnitude * 4)))
+                                        int(np.ceil(ep.magnitude * 4 * inten)))
             elif ep.kind == "demand_surge":
-                demand_mult[ep.node] = 1.0 + ep.magnitude
+                demand_mult[ep.node] = 1.0 + ep.magnitude * inten
 
         # random operational noise on capacity (reliability-driven)
         noise = rng.uniform(rel, 1.0, size=N)

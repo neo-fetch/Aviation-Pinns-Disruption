@@ -36,7 +36,7 @@ with model-ranked ones.
 | §3.3 Sequential multi-horizon forecasting | 6-week input windows → severity logits at +1/+2/+4/+8 weeks |
 | §3.4 Physics constraints | `src/pignn/physics.py` — flow conservation, capacity hinge penalties, lead-time consistency; exponential curriculum `λ(e)=λ_f(1−e^{−e/τ})` after a prediction-only warm-up |
 | §4.1 Evaluation | `src/pignn/evaluate.py` — binary detection (P/R/F1/AUC), 4-class severity F1, F1 vs. horizon, physics-violation diagnostics |
-| §4.2 Data efficiency | retraining both models at 100/50/25% training data |
+| §4.2 Data efficiency | retraining both models at 100/50/25% training data, averaged over 3 seeds |
 | §5 Mitigation | `src/pignn/mitigate.py` — counterfactual interventions (safety stock, expedited shipments) re-scored through the trained model |
 
 The **baseline GNN** is the identical architecture trained with physics
@@ -50,8 +50,11 @@ structurally realistic A320-program network (sole-source choke points on
 engines, nacelles, landing gear, fuselage sections; buyer-furnished-equipment
 edges from engine suppliers straight to FALs). `src/pignn/simulate.py`
 generates 156 weeks of flow/inventory dynamics that satisfy conservation of
-flow **by construction** (verified to ~1e-8 residual), then injects 30
-disruption episodes modeled on real aviation events:
+flow **by construction** (verified to ~1e-8 residual), then injects 60
+disruption episodes modeled on real aviation events. Episodes follow the
+paper's premise that warning signals accumulate gradually: each has a
+precursor ramp (weeks of slowly degrading capacity before the event) and an
+exponential recovery tail. Episode types:
 
 - `supplier_outage` — e.g. a fuselage-panel supplier fire or quality escape
 - `capacity_cut` — e.g. GTF-style engine inspection campaigns
@@ -68,7 +71,7 @@ your own weekly snapshots in the `SimResult` layout (`src/pignn/simulate.py`)
 
 ```bash
 pip install -r requirements.txt
-python scripts/run_poc.py          # full run (~6-8 min on CPU)
+python scripts/run_poc.py          # full run (~8-10 min on CPU)
 python scripts/run_poc.py --fast   # 15-second smoke test
 ```
 

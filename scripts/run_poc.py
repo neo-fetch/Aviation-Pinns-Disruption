@@ -104,10 +104,12 @@ def plot_data_efficiency(de, out):
     fig, ax = plt.subplots(figsize=(7, 5))
     fracs = list(de.keys())
     x = np.arange(len(fracs))
-    ax.plot(x, [de[f]["pignn"] for f in fracs], "o-", label="PI-GNN",
-            color="#d1495b")
-    ax.plot(x, [de[f]["baseline"] for f in fracs], "s-",
-            label="baseline GNN", color="#30638e")
+    ax.errorbar(x, [de[f]["pignn"] for f in fracs],
+                yerr=[de[f].get("pignn_std", 0) for f in fracs],
+                fmt="o-", label="PI-GNN", color="#d1495b", capsize=4)
+    ax.errorbar(x, [de[f]["baseline"] for f in fracs],
+                yerr=[de[f].get("baseline_std", 0) for f in fracs],
+                fmt="s-", label="baseline GNN", color="#30638e", capsize=4)
     ax.set_xticks(x, fracs)
     ax.set_xlabel("fraction of training data")
     ax.set_ylabel("binary disruption F1 (test, 1-week horizon)")

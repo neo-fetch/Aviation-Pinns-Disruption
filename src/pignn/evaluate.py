@@ -88,16 +88,23 @@ def strip_arrays(results: dict) -> dict:
 
 
 def data_efficiency_study(g, train_ds, val_ds, test_ds, cfg, fractions,
-                          train_fn) -> dict:
-    """Retrain both models on shrinking training fractions (paper §4.2)."""
+                          train_fn, n_seeds: int = 3) -> dict:
+    """Retrain both models on shrinking training fractions (paper §4.2),
+    averaged over seeds — small-data runs are high-variance."""
     out = {}
     for frac in fractions:
         row = {}
         for name, physics in (("pignn", True), ("baseline", False)):
-            print(f"[data-efficiency] {name} @ {int(frac * 100)}% training data")
-            model, _ = train_fn(g, train_ds, val_ds, cfg, physics=physics,
-                                train_fraction=frac, verbose=False)
-            res = evaluate_model(model, g, test_ds, cfg.HORIZONS)
-            row[name] = res["binary_1w"]["f1"]
+            f1s = []
+            for seed in range(n_seeds):
+                print(f"[data-efficiency] {name} @ {int(frac * 100)}% "
+                      f"training data, seed {seed}")
+                model, _ = train_fn(g, train_ds, val_ds, cfg, physics=physics,
+                                    seed=seed, train_fraction=frac,
+                                    verbose=False)
+                res = evaluate_model(model, g, test_ds, cfg.HORIZONS)
+                f1s.append(res["binary_1w"]["f1"])
+            row[name] = float(np.mean(f1s))
+            row[f"{name}_std"] = float(np.std(f1s))
         out[f"{int(frac * 100)}%"] = row
     return out
