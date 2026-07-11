@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+frontend/node_modules/
+frontend/dist/
+outputs/pignn_live.pt
+frontend/*.tsbuildinfo
