@@ -75,6 +75,52 @@ python scripts/run_poc.py          # full run (~8-10 min on CPU)
 python scripts/run_poc.py --fast   # 15-second smoke test
 ```
 
+## Interactive web app (live simulation)
+
+The engine also runs as a backend for a React + TypeScript frontend: a
+steppable version of the simulator (`pignn.simulate.LiveSimulator`) streams
+the network week-by-week over a WebSocket while the trained PI-GNN scores
+every node's disruption risk at each horizon in real time.
+
+```bash
+# backend (serves the built frontend at http://localhost:8000)
+pip install -r requirements.txt
+uvicorn server.app:app --port 8000
+
+# frontend dev server with hot reload (proxies /api and /ws to :8000)
+cd frontend && npm install && npm run dev
+
+# or build once and let FastAPI serve it
+cd frontend && npm install && npm run build
+```
+
+On first launch the backend trains a fast PI-GNN in the background
+(~a minute on CPU) and checkpoints it to `outputs/pignn_live.pt`; risk
+scores appear in the UI as soon as it is ready and the simulation has run
+at least 6 weeks (the model's input window). The fast model is a weak smoke
+version — use the **Retrain (full quality)** button (or
+`POST /api/model/train {"quality": "full"}`) for paper-config training.
+
+What you can do live:
+
+- **Play / pause / step / speed** a weekly simulation of the 65-node network;
+  node color shows actual severity (or the model's predicted risk at a chosen
+  horizon), edge brightness shows realized flow vs. transport capacity.
+- **Inject disruptions** (supplier outage, capacity cut, lead-time spike,
+  export restriction, demand surge) at any node with chosen magnitude,
+  duration, and start time — or reset into a seeded scenario with a
+  configurable number of auto-drawn episodes.
+- **Inspect any node**: live sparklines of utilization, inventory, backlog,
+  realized capacity reduction, and the model's risk trajectory for it.
+- **Watch the risk board**: top predicted-risk nodes per forecast horizon
+  (1/2/4/8 weeks), updated every simulated week.
+
+API surface: `GET /api/network`, `GET /api/metrics`, `GET /api/model`,
+`POST /api/model/train`, and the `ws://…/ws/simulation` protocol documented
+in `server/app.py`. Batch mode (`scripts/run_poc.py`) is unchanged — the
+refactor that enabled stepping (`LiveSimulator`) reproduces its output
+bit-for-bit.
+
 Outputs land in `outputs/`:
 
 - `metrics.json` — all metrics: topology analysis, PI-GNN vs. baseline,

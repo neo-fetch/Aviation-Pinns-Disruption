@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/api.ts","./src/color.ts","./src/main.tsx","./src/types.ts","./src/useSimulation.ts","./src/components/NetworkView.tsx","./src/components/NodePanel.tsx","./src/components/RiskPanel.tsx","./src/components/ScenarioPanel.tsx","./src/components/Sparkline.tsx"],"version":"5.9.3"}

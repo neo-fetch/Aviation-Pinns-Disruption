@@ -17,8 +17,14 @@ nominal dynamics:
 
 Severity labels per node per week come from the realized capacity reduction:
 none / minor / moderate (>=10%) / major (>=30%), matching the paper (§4.1).
+
+Two entry points share the same dynamics:
+  - simulate():     batch mode — pre-drawn episodes, fixed horizon, SimResult
+  - LiveSimulator:  stepping mode — advance one week at a time and inject
+                    episodes at runtime (drives the interactive web backend)
 """
 
+import math
 from dataclasses import dataclass
 
 import networkx as nx
@@ -48,7 +54,6 @@ class Episode:
             return 0.35 * (t - (self.start - self.pre_weeks)) / self.pre_weeks
         end = self.start + self.duration
         if end <= t < end + self.recovery_weeks * 3:
-            import math
             return math.exp(-(t - end) / self.recovery_weeks)
         return 0.0
 
@@ -104,59 +109,101 @@ def _draw_episodes(G, n_weeks, n_episodes, rng):
     return episodes
 
 
-def simulate(G: nx.DiGraph, n_weeks: int, n_episodes: int,
-             base_stock_weeks: float, severity_thresholds,
-             seed: int = 42) -> SimResult:
-    rng = np.random.default_rng(seed)
-    N = G.number_of_nodes()
-    edges = list(G.edges())
-    E = len(edges)
-    edge_index = np.array(edges, dtype=np.int64).T
-    lead = np.array([G.edges[e]["lead_time"] for e in edges], dtype=np.int64)
-    tcap = np.array([G.edges[e]["transport_capacity"] for e in edges])
-    pcap = np.array([G.nodes[i]["prod_capacity"] for i in range(N)])
-    scap = np.array([G.nodes[i]["storage_capacity"] for i in range(N)])
-    rel = np.array([G.nodes[i]["reliability"] for i in range(N)])
-    tier = np.array([G.nodes[i]["tier_idx"] for i in range(N)])
-    is_customer = tier == 5
-    is_raw = tier == 0
+class LiveSimulator:
+    """Stepping version of the simulator: same dynamics as simulate(), one
+    week per step() call, with episodes injectable at any time. Keeps full
+    history so a SimResult can be materialized at any point."""
 
-    in_edges = [[] for _ in range(N)]
-    out_edges = [[] for _ in range(N)]
-    for e, (u, v) in enumerate(edges):
-        out_edges[u].append(e)
-        in_edges[v].append(e)
+    def __init__(self, G: nx.DiGraph, base_stock_weeks: float,
+                 severity_thresholds, seed: int = 42, rng=None,
+                 episodes=None):
+        self.G = G
+        self.rng = rng if rng is not None else np.random.default_rng(seed)
+        self.severity_thresholds = tuple(severity_thresholds)
+        self.episodes = list(episodes) if episodes is not None else []
 
-    episodes = _draw_episodes(G, n_weeks, n_episodes, rng)
+        N = G.number_of_nodes()
+        self.N = N
+        self.edges = list(G.edges())
+        self.E = len(self.edges)
+        self.edge_index = np.array(self.edges, dtype=np.int64).T
+        self.lead = np.array([G.edges[e]["lead_time"] for e in self.edges],
+                             dtype=np.int64)
+        self.tcap = np.array([G.edges[e]["transport_capacity"]
+                              for e in self.edges])
+        self.pcap = np.array([G.nodes[i]["prod_capacity"] for i in range(N)])
+        self.scap = np.array([G.nodes[i]["storage_capacity"] for i in range(N)])
+        self.rel = np.array([G.nodes[i]["reliability"] for i in range(N)])
+        tier = np.array([G.nodes[i]["tier_idx"] for i in range(N)])
+        self.is_customer = tier == 5
+        self.is_raw = tier == 0
 
-    # steady-state-ish demand pull: customers draw aircraft from FALs;
-    # upstream demand propagates via orders.
-    cust_demand_base = {i: pcap[[e_src for e_src in range(N)]].mean() * 0
-                        for i in range(N)}  # placeholder, set below
-    fal_nodes = np.where(tier == 4)[0]
-    fal_rate = pcap[fal_nodes]  # aircraft/week per FAL
+        self.in_edges = [[] for _ in range(N)]
+        self.out_edges = [[] for _ in range(N)]
+        for e, (u, v) in enumerate(self.edges):
+            self.out_edges[u].append(e)
+            self.in_edges[v].append(e)
 
-    inventory = np.minimum(scap, pcap * base_stock_weeks)
-    inventory[is_customer] = 0.0
-    max_lead = int(lead.max())
-    pipeline = np.zeros((max_lead + 1, E))  # pipeline[k, e]: arrives in k weeks
+        # mutable dynamic state
+        self.inventory = np.minimum(self.scap, self.pcap * base_stock_weeks)
+        self.inventory[self.is_customer] = 0.0
+        self.max_lead = int(self.lead.max())
+        # pipeline[k, e]: material on edge e arriving in k weeks
+        self.pipeline = np.zeros((self.max_lead + 1, self.E))
+        self.backlog = np.zeros(N)
+        self.t = 0
 
-    node_dyn = np.zeros((n_weeks, N, 6), dtype=np.float32)
-    edge_flow = np.zeros((n_weeks, E), dtype=np.float32)
-    edge_order = np.zeros((n_weeks, E), dtype=np.float32)
-    edge_arrival = np.zeros((n_weeks, E), dtype=np.float32)
-    production = np.zeros((n_weeks, N), dtype=np.float32)
-    consumption = np.zeros((n_weeks, N), dtype=np.float32)
-    inv_hist = np.zeros((n_weeks, N), dtype=np.float32)
-    cap_red = np.zeros((n_weeks, N), dtype=np.float32)
-    backlog = np.zeros(N)
+        # per-week history (lists of arrays, stacked by result())
+        self.hist_node_dyn = []
+        self.hist_edge_flow = []
+        self.hist_edge_order = []
+        self.hist_edge_arrival = []
+        self.hist_production = []
+        self.hist_consumption = []
+        self.hist_inventory = []
+        self.hist_cap_red = []
+        self.hist_labels = []
 
-    for t in range(n_weeks):
+    # -------------------------------------------------------------- control
+    def inject(self, kind: str, node: int, magnitude: float, duration: int,
+               start_offset: int = 0, pre_weeks: int = 5,
+               recovery_weeks: int = 3) -> Episode:
+        """Schedule a disruption episode at runtime. start_offset=0 means the
+        episode's full-intensity phase begins this coming week (its precursor
+        ramp is skipped for offsets shorter than pre_weeks)."""
+        if kind not in DISRUPTION_TYPES:
+            raise ValueError(f"unknown disruption kind: {kind}")
+        ep = Episode(kind, int(node), self.t + int(start_offset),
+                     int(duration), float(magnitude),
+                     pre_weeks=pre_weeks, recovery_weeks=recovery_weeks)
+        self.episodes.append(ep)
+        return ep
+
+    def active_episodes(self, t=None):
+        """Episodes with nonzero intensity at week t (default: current)."""
+        t = self.t if t is None else t
+        out = []
+        for i, ep in enumerate(self.episodes):
+            inten = ep.intensity(t)
+            if inten > 0.0:
+                out.append((i, ep, inten))
+        return out
+
+    # ----------------------------------------------------------------- step
+    def step(self) -> dict:
+        """Advance one week and return this week's snapshot arrays."""
+        t = self.t
+        N, E, edges = self.N, self.E, self.edges
+        pcap, scap, tcap, lead = self.pcap, self.scap, self.tcap, self.lead
+        is_customer, is_raw = self.is_customer, self.is_raw
+        rng = self.rng
+        inventory = self.inventory
+
         # ---- disruption state this week ---------------------------------
         cap_mult = np.ones(N)
         lead_extra = np.zeros(E, dtype=np.int64)
         demand_mult = np.ones(N)
-        for ep in episodes:
+        for ep in self.episodes:
             inten = ep.intensity(t)
             if inten <= 0.0:
                 continue
@@ -164,21 +211,20 @@ def simulate(G: nx.DiGraph, n_weeks: int, n_episodes: int,
                 loss = ep.magnitude if ep.kind != "capacity_cut" else ep.magnitude * 0.6
                 cap_mult[ep.node] = min(cap_mult[ep.node], 1.0 - loss * inten)
             elif ep.kind == "leadtime_spike":
-                for e in in_edges[ep.node] + out_edges[ep.node]:
+                for e in self.in_edges[ep.node] + self.out_edges[ep.node]:
                     lead_extra[e] = max(lead_extra[e],
                                         int(np.ceil(ep.magnitude * 4 * inten)))
             elif ep.kind == "demand_surge":
                 demand_mult[ep.node] = 1.0 + ep.magnitude * inten
 
         # random operational noise on capacity (reliability-driven)
-        noise = rng.uniform(rel, 1.0, size=N)
+        noise = rng.uniform(self.rel, 1.0, size=N)
         cap_mult = cap_mult * noise
 
         # ---- arrivals ----------------------------------------------------
-        arrivals_e = pipeline[0].copy()
-        pipeline[:-1] = pipeline[1:]
-        pipeline[-1] = 0.0
-        edge_arrival[t] = arrivals_e
+        arrivals_e = self.pipeline[0].copy()
+        self.pipeline[:-1] = self.pipeline[1:]
+        self.pipeline[-1] = 0.0
         arrivals_n = np.zeros(N)
         for e, (u, v) in enumerate(edges):
             arrivals_n[v] += arrivals_e[e]
@@ -199,7 +245,7 @@ def simulate(G: nx.DiGraph, n_weeks: int, n_episodes: int,
             target = eff_cap[i] * demand_mult[i]
             if is_raw[i]:
                 # raw producers curtail to what they can ship or store
-                ship_cap = tcap[out_edges[i]].sum() if out_edges[i] else 0.0
+                ship_cap = tcap[self.out_edges[i]].sum() if self.out_edges[i] else 0.0
                 headroom = max(scap[i] - inventory[i], 0.0)
                 prod[i] = min(target, ship_cap + headroom)
             else:
@@ -223,9 +269,9 @@ def simulate(G: nx.DiGraph, n_weeks: int, n_episodes: int,
         ship_n = prod.copy()
         flows = np.zeros(E)
         for i in range(N):
-            if is_customer[i] or not out_edges[i]:
+            if is_customer[i] or not self.out_edges[i]:
                 continue
-            outs = out_edges[i]
+            outs = self.out_edges[i]
             caps = tcap[outs]
             dsts = [edges[e][1] for e in outs]
             w = caps * deficit[dsts]
@@ -246,49 +292,96 @@ def simulate(G: nx.DiGraph, n_weeks: int, n_episodes: int,
         cons = cons + disposal + overflow_out
 
         # ---- orders & pipeline insertion ---------------------------------
+        orders = np.zeros(E, dtype=np.float32)
         for e, (u, v) in enumerate(edges):
-            edge_order[t, e] = flows[e]
-            k = min(int(lead[e] + lead_extra[e]), max_lead)
-            pipeline[k, e] += flows[e]
-        edge_flow[t] = flows
+            orders[e] = flows[e]
+            k = min(int(lead[e] + lead_extra[e]), self.max_lead)
+            self.pipeline[k, e] += flows[e]
 
         # ---- bookkeeping --------------------------------------------------
-        production[t] = prod
-        consumption[t] = cons
-        inv_hist[t] = inventory
         realized_red = np.zeros(N)
-        active = eff_cap > 1e-9
         # realized reduction vs nominal capacity, material shortage included
         realized_red[~is_customer] = 1.0 - np.divide(
             prod[~is_customer], pcap[~is_customer],
             out=np.ones(np.sum(~is_customer)), where=pcap[~is_customer] > 0)
         realized_red = np.clip(realized_red, 0.0, 1.0)
         # remove baseline reliability noise floor so quiet weeks label as none
-        baseline = 1.0 - (1.0 + rel) / 2.0
+        baseline = 1.0 - (1.0 + self.rel) / 2.0
         realized_red = np.maximum(realized_red - baseline, 0.0)
-        cap_red[t] = realized_red
 
         util = np.divide(prod, pcap, out=np.zeros(N), where=pcap > 0)
         days_supply = np.divide(inventory, cons + 1e-6,
                                 out=np.full(N, 10.0), where=(cons + 1e-6) > 1e-5)
-        backlog = 0.8 * backlog + np.maximum(eff_cap * demand_mult - prod, 0.0)
-        node_dyn[t, :, 0] = inventory / np.maximum(scap, 1.0)
-        node_dyn[t, :, 1] = util
-        node_dyn[t, :, 2] = np.clip(days_supply / 10.0, 0, 2)
-        node_dyn[t, :, 3] = backlog / np.maximum(pcap, 1.0)
-        node_dyn[t, :, 4] = arrivals_n / np.maximum(pcap, 1.0)
-        node_dyn[t, :, 5] = realized_red
+        self.backlog = 0.8 * self.backlog + np.maximum(
+            eff_cap * demand_mult - prod, 0.0)
+        dyn = np.zeros((N, 6), dtype=np.float32)
+        dyn[:, 0] = inventory / np.maximum(scap, 1.0)
+        dyn[:, 1] = util
+        dyn[:, 2] = np.clip(days_supply / 10.0, 0, 2)
+        dyn[:, 3] = self.backlog / np.maximum(pcap, 1.0)
+        dyn[:, 4] = arrivals_n / np.maximum(pcap, 1.0)
+        dyn[:, 5] = realized_red
 
-    minor, moderate, major = severity_thresholds
-    labels = np.zeros((n_weeks, N), dtype=np.int64)
-    labels[cap_red >= minor] = 1
-    labels[cap_red >= moderate] = 2
-    labels[cap_red >= major] = 3
+        minor, moderate, major = self.severity_thresholds
+        labels = np.zeros(N, dtype=np.int64)
+        labels[realized_red >= minor] = 1
+        labels[realized_red >= moderate] = 2
+        labels[realized_red >= major] = 3
 
-    return SimResult(node_dyn=node_dyn, edge_flow=edge_flow,
-                     edge_order=edge_order, edge_arrival=edge_arrival,
-                     production=production, consumption=consumption,
-                     inventory=inv_hist, cap_reduction=cap_red, labels=labels,
-                     episodes=episodes, edge_index=edge_index,
-                     lead_times=lead, trans_cap=tcap, prod_cap=pcap,
-                     stor_cap=scap)
+        self.inventory = inventory
+        self.hist_node_dyn.append(dyn)
+        self.hist_edge_flow.append(flows.astype(np.float32))
+        self.hist_edge_order.append(orders)
+        self.hist_edge_arrival.append(arrivals_e.astype(np.float32))
+        self.hist_production.append(prod.astype(np.float32))
+        self.hist_consumption.append(cons.astype(np.float32))
+        self.hist_inventory.append(inventory.astype(np.float32))
+        self.hist_cap_red.append(realized_red.astype(np.float32))
+        self.hist_labels.append(labels)
+        self.t = t + 1
+
+        return {
+            "week": t,
+            "node_dyn": dyn,
+            "production": prod,
+            "consumption": cons,
+            "inventory": inventory.copy(),
+            "cap_reduction": realized_red,
+            "labels": labels,
+            "edge_flow": flows,
+            "edge_arrival": arrivals_e,
+            "active_episodes": self.active_episodes(t),
+        }
+
+    # --------------------------------------------------------------- export
+    def result(self) -> SimResult:
+        """Materialize the full history as a SimResult (batch layout)."""
+        return SimResult(
+            node_dyn=np.stack(self.hist_node_dyn),
+            edge_flow=np.stack(self.hist_edge_flow),
+            edge_order=np.stack(self.hist_edge_order),
+            edge_arrival=np.stack(self.hist_edge_arrival),
+            production=np.stack(self.hist_production),
+            consumption=np.stack(self.hist_consumption),
+            inventory=np.stack(self.hist_inventory),
+            cap_reduction=np.stack(self.hist_cap_red),
+            labels=np.stack(self.hist_labels),
+            episodes=self.episodes,
+            edge_index=self.edge_index,
+            lead_times=self.lead,
+            trans_cap=self.tcap,
+            prod_cap=self.pcap,
+            stor_cap=self.scap,
+        )
+
+
+def simulate(G: nx.DiGraph, n_weeks: int, n_episodes: int,
+             base_stock_weeks: float, severity_thresholds,
+             seed: int = 42) -> SimResult:
+    rng = np.random.default_rng(seed)
+    episodes = _draw_episodes(G, n_weeks, n_episodes, rng)
+    sim = LiveSimulator(G, base_stock_weeks, severity_thresholds,
+                        rng=rng, episodes=episodes)
+    for _ in range(n_weeks):
+        sim.step()
+    return sim.result()
