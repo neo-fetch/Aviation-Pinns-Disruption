@@ -1,15 +1,20 @@
-// Color mapping for node encodings, using the palette tokens in styles.css.
+// Color mapping for node encodings — "Morning Mist" light theme.
+// Severity set and risk ramp validated with the dataviz palette validator
+// against the mist surface (#f4f2fa): the three active severities pass the
+// lightness band, chroma floor, and CVD-separation checks; "none" and the
+// ramp's light end deliberately recede toward the surface. Severity is never
+// color-alone (legend text, tooltips, inspector readouts).
 
-export const SEVERITY_COLORS = ["#383835", "#fab219", "#ec835a", "#d03b3b"];
+export const SEVERITY_COLORS = ["#d8d6e8", "#d4a24a", "#cf7256", "#a94a74"];
 export const SEVERITY_NAMES = ["none", "minor", "moderate", "major"];
 
-// Sequential ramp for model risk on the dark surface: near-zero recedes
-// toward the surface, high risk is the brightest blue step.
+// Sequential ramp for model risk on the light surface: near-zero fades into
+// the mist, high risk deepens to violet. Mirrors --seq-* in styles.css.
 const RISK_STOPS: [number, string][] = [
-  [0.0, "#222221"],
-  [0.33, "#184f95"],
-  [0.66, "#3987e5"],
-  [1.0, "#86b6ef"],
+  [0.0, "#eceafa"],
+  [0.33, "#c3c1f0"],
+  [0.66, "#8b93e6"],
+  [1.0, "#5b5cb8"],
 ];
 
 function hexToRgb(hex: string): [number, number, number] {

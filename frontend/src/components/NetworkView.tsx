@@ -24,6 +24,13 @@ interface Pos {
   r: number;
 }
 
+// gentle S-curve between tier columns: control points at the horizontal
+// midpoint so edges leave and arrive level, like drifting threads
+function edgePath(a: Pos, b: Pos): string {
+  const mx = (a.x + b.x) / 2;
+  return `M${a.x},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x},${b.y}`;
+}
+
 export function NetworkView({
   network,
   latest,
@@ -67,12 +74,12 @@ export function NetworkView({
   }, [latest]);
 
   const fillFor = (id: number): string => {
-    if (!latest) return "var(--surface-2)";
+    if (!latest) return "var(--seq-0)";
     if (colorMode === "risk") {
       const r = latest.risk?.risk[horizonIdx]?.[id];
-      return r === undefined ? "var(--surface-2)" : riskColor(r);
+      return r === undefined ? "var(--seq-0)" : riskColor(r);
     }
-    return SEVERITY_COLORS[latest.nodes.severity[id]] ?? "var(--surface-2)";
+    return SEVERITY_COLORS[latest.nodes.severity[id]] ?? "var(--seq-0)";
   };
 
   const hoverNode = hover ? network.nodes[hover.id] : null;
@@ -81,84 +88,91 @@ export function NetworkView({
     <div className="canvas-wrap">
       <svg viewBox={`0 0 ${VW} ${VH}`} preserveAspectRatio="xMidYMid meet"
            onClick={() => onSelect(null)}>
+        <defs>
+          {/* soft lavender halo behind every node */}
+          <filter id="softGlow" x="-80%" y="-80%" width="260%" height="260%">
+            <feDropShadow dx="0" dy="1" stdDeviation="4"
+                          floodColor="#8b93e6" floodOpacity="0.35" />
+          </filter>
+          {/* wide blur for breathing disruption halos */}
+          <filter id="haloBlur" x="-120%" y="-120%" width="340%" height="340%">
+            <feGaussianBlur stdDeviation="4" />
+          </filter>
+        </defs>
+
         {/* tier column headings */}
         {network.meta.tiers.map((t, i) => (
           <text
             key={t}
+            className="tier-label"
             x={MARGIN_X + (i / (network.meta.tiers.length - 1)) * (VW - 2 * MARGIN_X)}
-            y={20}
+            y={22}
             textAnchor="middle"
-            fill="var(--ink-muted)"
-            fontSize={12}
           >
             {TIER_LABELS[t] ?? t}
           </text>
         ))}
 
-        {/* edges: opacity/width follow live flow (fraction of transport cap) */}
+        {/* edges: drifting threads whose presence follows live flow */}
         <g>
           {network.edges.map((e, i) => {
             const a = layout.get(e.source)!;
             const b = layout.get(e.target)!;
             const f = latest?.edges.flow_frac[i] ?? 0;
             return (
-              <line
+              <path
                 key={i}
-                x1={a.x}
-                y1={a.y}
-                x2={b.x}
-                y2={b.y}
-                stroke={f > 0.02 ? "var(--seq-500)" : "var(--baseline)"}
-                strokeWidth={0.5 + f * 2.2}
-                opacity={0.12 + f * 0.55}
+                className="edge"
+                d={edgePath(a, b)}
+                stroke={f > 0.02 ? "var(--accent)" : "#c9c4e4"}
+                strokeWidth={0.8 + f * 2.2}
+                opacity={0.18 + f * 0.5}
               >
                 <title>
                   {`${network.nodes[e.source].name} → ${network.nodes[e.target].name}\nlead ${e.lead_time}w · flow ${(f * 100).toFixed(0)}% of transport cap`}
                 </title>
-              </line>
+              </path>
             );
           })}
         </g>
 
-        {/* disruption epicenter pulses */}
+        {/* disruption epicenters: breathing rose halos */}
         <g>
           {[...activeEpicenters.entries()].map(([id, inten]) => {
             const p = layout.get(id)!;
             return (
               <circle
                 key={id}
+                className="halo"
                 cx={p.x}
                 cy={p.y}
-                r={p.r + 5 + inten * 5}
-                fill="none"
-                stroke="var(--status-critical)"
-                strokeWidth={1.5}
-                opacity={0.35 + inten * 0.45}
+                r={p.r + 7 + inten * 4}
+                fill="var(--sev-3)"
+                opacity={0.3 + inten * 0.3}
+                filter="url(#haloBlur)"
               />
             );
           })}
         </g>
 
-        {/* nodes */}
-        <g>
+        {/* nodes: softly glowing orbs */}
+        <g filter="url(#softGlow)">
           {network.nodes.map((n) => {
             const p = layout.get(n.id)!;
             return (
               <circle
                 key={n.id}
+                className="node-dot"
                 cx={p.x}
                 cy={p.y}
                 r={p.r}
                 fill={fillFor(n.id)}
                 stroke={
-                  selected === n.id
-                    ? "var(--seq-250)"
-                    : n.is_sole_source
-                      ? "var(--ink-2)"
-                      : "var(--border)"
+                  n.is_sole_source
+                    ? "rgba(255, 255, 255, 0.95)"
+                    : "rgba(255, 255, 255, 0.55)"
                 }
-                strokeWidth={selected === n.id ? 2.5 : n.is_sole_source ? 1.5 : 0.75}
-                style={{ cursor: "pointer" }}
+                strokeWidth={n.is_sole_source ? 2.25 : 1}
                 onClick={(ev) => {
                   ev.stopPropagation();
                   onSelect(n.id);
@@ -173,6 +187,21 @@ export function NetworkView({
             );
           })}
         </g>
+
+        {/* selection: gentle periwinkle ring */}
+        {selected != null && layout.has(selected) && (
+          <circle
+            className="select-ring"
+            cx={layout.get(selected)!.x}
+            cy={layout.get(selected)!.y}
+            r={layout.get(selected)!.r + 4.5}
+            fill="none"
+            stroke="var(--accent)"
+            strokeWidth={2}
+            opacity={0.85}
+            filter="url(#softGlow)"
+          />
+        )}
       </svg>
 
       {hoverNode && hover && latest && (
@@ -233,14 +262,21 @@ export function NetworkView({
         <div className="li">
           <span
             className="swatch"
-            style={{ background: "transparent", border: "1.5px solid var(--ink-2)" }}
+            style={{
+              background: "var(--seq-0)",
+              border: "2px solid #fff",
+              boxShadow: "0 0 0 1px var(--hairline)",
+            }}
           />
           sole-source supplier
         </div>
         <div className="li">
           <span
             className="swatch"
-            style={{ background: "transparent", border: "1.5px solid var(--status-critical)" }}
+            style={{
+              background: "rgba(169, 74, 116, 0.45)",
+              boxShadow: "0 0 6px 2px rgba(169, 74, 116, 0.35)",
+            }}
           />
           active disruption epicenter
         </div>

@@ -93,14 +93,14 @@ export function NodePanel({
           <Sparkline title="Backlog (weeks of capacity)" values={series("backlog")}
                      startWeek={startWeek} format={(v) => v.toFixed(2)} />
           <Sparkline title="Capacity reduction" values={series("cap_reduction")}
-                     startWeek={startWeek} format={pct} color="var(--status-serious)" />
+                     startWeek={startWeek} format={pct} color="var(--sev-2)" />
           {riskSeries.length > 1 && (
             <Sparkline
               title={`Model risk, +${network.meta.horizons[horizonIdx]}w`}
               values={riskSeries}
               startWeek={riskStart}
               format={pct}
-              color="var(--seq-250)"
+              color="var(--accent-deep)"
             />
           )}
         </>

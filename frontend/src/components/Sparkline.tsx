@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 
 interface Props {
   title: string;
@@ -11,20 +11,22 @@ interface Props {
 
 const W = 300;
 
-/** Single-series line chart with a hover crosshair + value readout. */
+/** Single-series line with a soft gradient wash beneath it and a hover
+    crosshair + value readout. */
 export function Sparkline({
   title,
   values,
   startWeek,
-  color = "var(--series-1)",
+  color = "var(--accent)",
   height = 44,
   format = (v) => v.toFixed(3),
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const gradId = useId();
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
-  const { path, min, max } = useMemo(() => {
-    if (values.length === 0) return { path: "", min: 0, max: 1 };
+  const { path, area, min, max } = useMemo(() => {
+    if (values.length === 0) return { path: "", area: "", min: 0, max: 1 };
     let mn = Math.min(...values);
     let mx = Math.max(...values);
     if (mx - mn < 1e-9) {
@@ -35,9 +37,17 @@ export function Sparkline({
     const pts = values.map((v, i) => {
       const x = n === 1 ? W / 2 : (i / (n - 1)) * W;
       const y = height - 3 - ((v - mn) / (mx - mn)) * (height - 6);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
+      return [x, y] as const;
     });
-    return { path: `M${pts.join("L")}`, min: mn, max: mx };
+    const line = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join("L");
+    const first = pts[0];
+    const last = pts[pts.length - 1];
+    return {
+      path: `M${line}`,
+      area: `M${first[0].toFixed(1)},${height - 1}L${line}L${last[0].toFixed(1)},${height - 1}Z`,
+      min: mn,
+      max: mx,
+    };
   }, [values, height]);
 
   const onMove = (e: React.MouseEvent) => {
@@ -72,16 +82,30 @@ export function Sparkline({
         role="img"
         aria-label={`${title}: latest ${cur !== undefined ? format(cur) : "n/a"}, range ${format(min)} to ${format(max)}`}
       >
+        <defs>
+          <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity={0.22} />
+            <stop offset="100%" stopColor={color} stopOpacity={0.02} />
+          </linearGradient>
+        </defs>
         <line
           x1={0}
           y1={height - 1}
           x2={W}
           y2={height - 1}
-          stroke="var(--baseline)"
+          stroke="var(--hairline)"
           strokeWidth={1}
         />
+        {area && <path d={area} fill={`url(#${gradId})`} />}
         {path && (
-          <path d={path} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" />
+          <path
+            d={path}
+            fill="none"
+            stroke={color}
+            strokeWidth={2}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
         )}
         {hoverIdx !== null && (
           <line
@@ -91,7 +115,7 @@ export function Sparkline({
             y2={height}
             stroke="var(--ink-muted)"
             strokeWidth={1}
-            strokeDasharray="2,2"
+            strokeDasharray="2,3"
           />
         )}
       </svg>

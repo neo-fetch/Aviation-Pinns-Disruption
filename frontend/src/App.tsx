@@ -131,7 +131,7 @@ export default function App() {
         <div style={{ marginLeft: "auto" }}>
           {(sim.latest?.active_episodes ?? []).slice(0, 4).map((ep, i) => (
             <span className="event-chip" key={i} title={network.nodes[ep.node]?.name}>
-              ⚠ {ep.kind.replace("_", " ")} @ {network.nodes[ep.node]?.name?.slice(0, 22)}
+              ◦ {ep.kind.replace("_", " ")} · {network.nodes[ep.node]?.name?.slice(0, 22)}
             </span>
           ))}
         </div>
