@@ -2,7 +2,8 @@
 
 A task-oriented guide to running and using the interactive supply chain
 simulation. For what the project is and why it exists, read the
-[Business Overview](BUSINESS_OVERVIEW.md) first.
+[Business Overview](BUSINESS_OVERVIEW.md) first; for how it all works under
+the hood, see the [Technical Guide](TECHNICAL_GUIDE.md).
 
 ---
 

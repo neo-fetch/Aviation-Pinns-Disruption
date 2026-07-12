@@ -161,6 +161,10 @@ Production-izing means:
 
 ## Appendix: technical summary
 
+For the full internals — how the simulator, model, physics constraints,
+and live backend actually work — see the
+[Technical Guide](TECHNICAL_GUIDE.md).
+
 - **Research basis:** *Physics-Informed Graph Neural Networks for Supply
   Chain Disruption Prediction and Mitigation* (Petrova & Hughes, Frontiers
   in Applied Physics and Mathematics, 2025). This project implements the
