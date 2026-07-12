@@ -11,6 +11,16 @@ horizons, while physics-based loss terms force its internal picture of the
 network to obey conservation of flow, capacity limits, and lead-time
 consistency — the "laws of motion" of a supply chain.
 
+## Documentation
+
+- **[Business overview](docs/BUSINESS_OVERVIEW.md)** — what this project
+  does and why it's useful, written for non-technical stakeholders.
+- **[User guide](docs/USER_GUIDE.md)** — how to run and use the live
+  simulation web app effectively.
+- **[Technical guide](docs/TECHNICAL_GUIDE.md)** — what happens behind the
+  scenes: network builder, simulator, model, physics losses, training,
+  live backend, and frontend internals.
+
 ## Positioning vs. AnyLogic (deliberately non-overlapping)
 
 | | AnyLogic (existing) | This PoC (new layer) |
