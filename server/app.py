@@ -39,14 +39,18 @@ for p in (str(ROOT), str(ROOT / "src")):
         sys.path.insert(0, p)
 
 import config as cfg
-from pignn.network import build_airbus_network, node_static_features
+from pignn.network import (apply_custom_nodes, build_airbus_network,
+                           node_static_features)
 from pignn.simulate import (DISRUPTION_TYPES, LiveSimulator, _draw_episodes)
 from pignn.topology import (analytical_measures, structural_node_features,
                             vulnerability_ranking)
+from server.custom_nodes import (REGIONS, CustomNodeStore, normalize_def,
+                                 validate_def)
 from server.model_service import SEVERITY_THRESHOLDS, ModelService
 
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 CKPT_PATH = ROOT / cfg.OUTPUT_DIR / "pignn_live.pt"
+CUSTOM_NODES_PATH = ROOT / "data" / "custom_nodes.json"
 
 state: dict = {}
 
@@ -60,22 +64,45 @@ def _episode_dict(ep, idx=None):
     return d
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+def build_app_state():
+    """(Re)build the graph (built-ins + stored custom nodes), its features
+    and analytics, and install a fresh ModelService. Called at startup and
+    after every custom-node add/remove."""
     G = build_airbus_network(cfg.SEED)
+    apply_custom_nodes(G, state["store"].load())
     static = np.concatenate([node_static_features(G),
                              structural_node_features(G)], axis=1)
+    old = state.get("model")
+    if old is not None:
+        old.cancel()
+    svc = ModelService(G, static, CKPT_PATH)
     state["G"] = G
     state["node_names"] = [G.nodes[i]["name"] for i in range(G.number_of_nodes())]
     state["measures"] = analytical_measures(G)
     state["ranking"] = vulnerability_ranking(G)
-    svc = ModelService(G, static, CKPT_PATH)
     state["model"] = svc
-    # a checkpoint from a previous run gets us risk scores immediately;
+    # a checkpoint for this exact graph gets us risk scores immediately;
     # otherwise train a fast model in the background so the UI lights up
-    # within ~a minute of first launch
+    # within ~a minute
     if not svc.load_checkpoint():
         svc.start_training("fast")
+
+
+async def _close_all_sessions():
+    """Force live websocket clients to reconnect onto the rebuilt graph."""
+    for ws in list(state["ws_clients"]):
+        try:
+            await ws.close(code=4001, reason="network changed")
+        except Exception:
+            pass
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    state["store"] = CustomNodeStore(CUSTOM_NODES_PATH)
+    state["rebuild_lock"] = asyncio.Lock()
+    state["ws_clients"] = set()
+    build_app_state()
     yield
 
 
@@ -98,6 +125,7 @@ def get_network():
             "storage_capacity": round(min(d["storage_capacity"], 1e6), 1),
             "reliability": round(d["reliability"], 3),
             "is_sole_source": d["is_sole_source"],
+            "is_custom": bool(d.get("is_custom", False)),
             "in_degree": G.in_degree(i), "out_degree": G.out_degree(i),
         })
     edges = [{"source": u, "target": v,
@@ -119,8 +147,67 @@ def get_network():
             "severity_classes": ["none", "minor", "moderate", "major"],
             "disruption_types": list(DISRUPTION_TYPES),
             "tiers": ["raw", "tier2", "tier1", "plant", "fal", "customer"],
+            "regions": list(REGIONS),
         },
     }
+
+
+# ------------------------------------------------- custom node management
+def _resolve_custom_ids(defs):
+    name_to_id = {n: i for i, n in enumerate(state["node_names"])}
+    return [{**d, "id": name_to_id.get(d["name"])} for d in defs]
+
+
+@app.get("/api/network/custom")
+def list_custom_nodes():
+    return {"nodes": _resolve_custom_ids(state["store"].load())}
+
+
+@app.post("/api/network/custom")
+async def add_custom_node(body: dict):
+    async with state["rebuild_lock"]:
+        d = normalize_def(body or {})
+        errors = validate_def(d, state["G"])
+        if errors:
+            return JSONResponse({"errors": errors}, status_code=422)
+        store: CustomNodeStore = state["store"]
+        store.add(d)
+        try:
+            build_app_state()
+        except Exception as e:
+            store.remove(d["name"])
+            build_app_state()
+            return JSONResponse(
+                {"errors": [f"failed to rebuild network: {e}"]},
+                status_code=500)
+        await _close_all_sessions()
+        node_id = state["node_names"].index(d["name"])
+        return {"node": {**d, "id": node_id},
+                "n_nodes": state["G"].number_of_nodes(),
+                "model": state["model"].status()}
+
+
+@app.delete("/api/network/custom/{name}")
+async def remove_custom_node(name: str):
+    async with state["rebuild_lock"]:
+        store: CustomNodeStore = state["store"]
+        refs = store.referenced_by(name)
+        if refs:
+            return JSONResponse(
+                {"errors": [f"'{name}' is referenced by custom node(s): "
+                            f"{', '.join(refs)} — remove those first"]},
+                status_code=409)
+        try:
+            store.remove(name)
+        except KeyError:
+            return JSONResponse(
+                {"errors": [f"no custom node named '{name}'"]},
+                status_code=404)
+        build_app_state()
+        await _close_all_sessions()
+        return {"removed": name,
+                "n_nodes": state["G"].number_of_nodes(),
+                "model": state["model"].status()}
 
 
 @app.get("/api/metrics")
@@ -212,6 +299,7 @@ class SimSession:
     def hello(self) -> dict:
         return {
             "type": "hello",
+            "n_nodes": self.sim.N,
             "seed": self.seed,
             "week": self.sim.t,
             "playing": self.playing,
@@ -231,6 +319,7 @@ class SimSession:
 @app.websocket("/ws/simulation")
 async def ws_simulation(ws: WebSocket):
     await ws.accept()
+    state["ws_clients"].add(ws)
     q = ws.query_params
     session = SimSession(
         seed=q.get("seed"),
@@ -294,6 +383,7 @@ async def ws_simulation(ws: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
+        state["ws_clients"].discard(ws)
         task.cancel()
 
 

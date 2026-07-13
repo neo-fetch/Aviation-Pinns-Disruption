@@ -77,6 +77,13 @@ moderate, >30% major. To use real data, replace the simulator output with
 your own weekly snapshots in the `SimResult` layout (`src/pignn/simulate.py`)
 — everything downstream is agnostic to where the snapshots came from.
 
+The live web app can also **extend the network with custom nodes** (e.g. a
+hypothetical FAL Bangalore) from its Network tab or via
+`POST /api/network/custom` — auto-wired to match the built-in topology,
+persisted in `data/custom_nodes.json`, with an automatic model retrain on
+every change. See the [User Guide](docs/USER_GUIDE.md) §7½. The batch
+pipeline below always describes the base 65-node network.
+
 ## Run it
 
 ```bash

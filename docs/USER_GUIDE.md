@@ -173,6 +173,35 @@ chip, and — some weeks later — coral/rose severity spreading downstream.
 Each browser tab gets its own independent simulation, so you can run a
 quiet baseline and a stress scenario side by side.
 
+## 7½. Custom nodes (the Network tab)
+
+The built-in 65-node Airbus network is fixed, but you can extend it with
+your own nodes — say, a hypothetical **FAL Bangalore** — and then disrupt
+them like any other node:
+
+1. Open the **Network** tab, enter a name, pick a tier (e.g. *Final
+   assembly line*), a region, a weekly production rate, storage, and
+   reliability, then click **Add node**.
+2. Connections are **auto-wired** to match how built-in nodes of that tier
+   are wired — a new FAL is fed by Airbus plants plus the engine and
+   landing-gear suppliers, and delivers to customers. *Connection
+   overrides* lets you add specific extra suppliers or destinations on top.
+3. Adding (or removing) a node rebuilds the network, restarts every live
+   simulation, and kicks off a fast background retrain — risk scores
+   return when the model badge reads `ready` (about a minute).
+4. Head to the **Scenario** tab: the new node is in the epicenter list, so
+   you can inject a disruption at it and watch the impact propagate.
+
+Custom nodes persist across server restarts (they're stored in
+`data/custom_nodes.json`) and can be removed from the same tab. Built-in
+nodes can't be edited or removed. The same operations exist as REST
+endpoints: `GET/POST /api/network/custom` and
+`DELETE /api/network/custom/{name}`.
+
+Note: the batch pipeline (`scripts/run_poc.py`) and its committed metrics
+always describe the base 65-node network; custom nodes only exist in the
+live app.
+
 ## 8. Managing the model
 
 | Badge | Meaning | What to do |

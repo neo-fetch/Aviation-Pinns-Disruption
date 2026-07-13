@@ -13,6 +13,7 @@ export interface SimState {
   connected: boolean;
   playing: boolean;
   speed: number;
+  nNodes: number | null;
   seed: number | null;
   week: number;
   frames: WeekFrame[];
@@ -26,6 +27,7 @@ const initial: SimState = {
   connected: false,
   playing: false,
   speed: 2,
+  nNodes: null,
   seed: null,
   week: 0,
   frames: [],
@@ -76,6 +78,7 @@ export function useSimulation(): [SimState, SimControls] {
             case "hello":
               return {
                 ...s,
+                nNodes: msg.n_nodes,
                 seed: msg.seed,
                 week: msg.week,
                 playing: msg.playing,

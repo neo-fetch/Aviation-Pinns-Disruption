@@ -1,13 +1,14 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { fetchModelStatus, fetchNetwork } from "./api";
 import type { ModelStatus, NetworkResponse } from "./types";
 import { useSimulation } from "./useSimulation";
 import { NetworkView, type ColorMode } from "./components/NetworkView";
+import { NetworkPanel } from "./components/NetworkPanel";
 import { NodePanel } from "./components/NodePanel";
 import { RiskPanel } from "./components/RiskPanel";
 import { ScenarioPanel } from "./components/ScenarioPanel";
 
-type Tab = "inspector" | "risk" | "scenario";
+type Tab = "inspector" | "risk" | "scenario" | "network";
 
 export default function App() {
   const [network, setNetwork] = useState<NetworkResponse | null>(null);
@@ -20,9 +21,23 @@ export default function App() {
   const [injectNode, setInjectNode] = useState<number | null>(null);
   const [model, setModel] = useState<ModelStatus | null>(null);
 
+  const reloadNetwork = useCallback(() => {
+    setSelected(null);
+    setInjectNode(null);
+    fetchNetwork().then(setNetwork).catch((e) => setLoadError(String(e)));
+  }, []);
+
   useEffect(() => {
     fetchNetwork().then(setNetwork).catch((e) => setLoadError(String(e)));
   }, []);
+
+  // a rebuilt backend graph (custom node added/removed, possibly from
+  // another tab) shows up as a node-count mismatch on the next hello
+  useEffect(() => {
+    if (network && sim.nNodes != null && sim.nNodes !== network.nodes.length) {
+      reloadNetwork();
+    }
+  }, [network, sim.nNodes, reloadNetwork]);
 
   // poll model status while it's training so the badge flips to ready
   useEffect(() => {
@@ -154,7 +169,7 @@ export default function App() {
         />
         <aside className="sidebar">
           <div className="tabs">
-            {(["inspector", "risk", "scenario"] as Tab[]).map((t) => (
+            {(["inspector", "risk", "scenario", "network"] as Tab[]).map((t) => (
               <button
                 key={t}
                 className={tab === t ? "active" : ""}
@@ -197,6 +212,9 @@ export default function App() {
               controls={controls}
               injectNode={injectNode}
             />
+          )}
+          {tab === "network" && (
+            <NetworkPanel network={network} onNetworkChanged={reloadNetwork} />
           )}
         </aside>
       </div>
