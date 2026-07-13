@@ -139,7 +139,10 @@ export function NetworkView({
         {/* disruption epicenters: breathing rose halos */}
         <g>
           {[...activeEpicenters.entries()].map(([id, inten]) => {
-            const p = layout.get(id)!;
+            // a stale frame can reference a node that was just removed,
+            // in the window before the rebuilt session reconnects
+            const p = layout.get(id);
+            if (!p) return null;
             return (
               <circle
                 key={id}

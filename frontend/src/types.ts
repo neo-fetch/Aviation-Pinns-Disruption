@@ -10,6 +10,7 @@ export interface NetworkNode {
   storage_capacity: number;
   reliability: number;
   is_sole_source: boolean;
+  is_custom: boolean;
   in_degree: number;
   out_degree: number;
 }
@@ -28,6 +29,7 @@ export interface NetworkMeta {
   severity_classes: string[];
   disruption_types: string[];
   tiers: string[];
+  regions: string[];
 }
 
 export interface VulnerabilityEntry {
@@ -95,6 +97,7 @@ export interface ModelStatus {
 
 export interface HelloMsg {
   type: "hello";
+  n_nodes: number;
   seed: number;
   week: number;
   playing: boolean;
@@ -130,4 +133,18 @@ export interface InjectRequest {
   magnitude: number;
   duration: number;
   start_offset: number;
+}
+
+export interface CustomNodeDef {
+  name: string;
+  tier: string;
+  region: string;
+  prod_capacity: number;
+  storage_capacity: number;
+  reliability: number;
+  is_sole_source: boolean;
+  upstream: string[];
+  downstream: string[];
+  exclude_upstream: string[];
+  exclude_downstream: string[];
 }

@@ -13,6 +13,7 @@ import torch
 import config as cfg
 from pignn.dataset import build_graph_tensors, temporal_splits
 from pignn.model import PIGNN
+from pignn.network import graph_fingerprint
 from pignn.simulate import simulate
 from pignn.train import train_model
 
@@ -37,7 +38,9 @@ class ModelService:
     def __init__(self, G, static_feats: np.ndarray, ckpt_path: Path):
         self.G = G
         self.ckpt_path = Path(ckpt_path)
+        self.fingerprint = graph_fingerprint(G)
         self._lock = threading.Lock()
+        self._cancelled = False
         self.model = None
         self.state = "untrained"          # untrained | training | ready | failed
         self.quality = None
@@ -69,6 +72,10 @@ class ModelService:
         try:
             payload = torch.load(self.ckpt_path, map_location="cpu",
                                  weights_only=True)
+            if payload.get("fingerprint") != self.fingerprint:
+                # checkpoint was trained on a different network (e.g. before
+                # a custom node was added/removed): retrain instead
+                return False
             model = self._new_model()
             model.load_state_dict(payload["state_dict"])
             model.eval()
@@ -107,9 +114,14 @@ class ModelService:
                                          physics=True, verbose=False)
             val_f1 = max((h["val_f1"] for h in history), default=None)
             trained_at = time.time()
+            if self._cancelled:
+                # a graph rebuild replaced this service mid-train: discard the
+                # result rather than clobbering the new graph's checkpoint
+                return
             self.ckpt_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save({"state_dict": model.state_dict(), "quality": quality,
-                        "val_f1": val_f1, "trained_at": trained_at},
+                        "val_f1": val_f1, "trained_at": trained_at,
+                        "fingerprint": self.fingerprint},
                        self.ckpt_path)
             with self._lock:
                 self.model = model
@@ -120,6 +132,11 @@ class ModelService:
             with self._lock:
                 self.state = "failed"
                 self.error = str(e)
+
+    def cancel(self):
+        """Detach this service after a graph rebuild: any in-flight training
+        finishes silently without saving or hot-swapping."""
+        self._cancelled = True
 
     def status(self) -> dict:
         with self._lock:
@@ -139,6 +156,10 @@ class ModelService:
         with self._lock:
             model = self.model
         if model is None or dyn_window.shape[0] < cfg.T_IN:
+            return None
+        if dyn_window.shape[1] != self.g.static.shape[0]:
+            # window comes from a simulator built on a different graph
+            # (session not yet reconnected after a rebuild): no risk overlay
             return None
         dyn = torch.tensor(dyn_window[None, -cfg.T_IN:],
                            dtype=torch.float32)

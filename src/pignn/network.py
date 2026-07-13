@@ -12,6 +12,8 @@ time (weeks) and transport capacity, which the simulator and the physics
 losses both consume.
 """
 
+import hashlib
+import zlib
 from dataclasses import dataclass, field
 
 import networkx as nx
@@ -25,6 +27,22 @@ TIERS = {
     "fal": 4,        # final assembly lines
     "customer": 5,   # airline delivery centers
 }
+
+TIER_ORDER = ["raw", "tier2", "tier1", "plant", "fal", "customer"]
+
+# (src_tier, dst_tier) -> (in_degree_range, lead_time_range); mirrors the
+# connect() calls in build_airbus_network so custom nodes wire identically.
+TIER_WIRING = {
+    ("raw", "tier2"): ((2, 4), (2, 6)),
+    ("tier2", "tier1"): ((3, 6), (1, 4)),
+    ("tier1", "plant"): ((4, 8), (1, 3)),
+    ("plant", "fal"): ((3, 6), (1, 3)),
+    ("fal", "customer"): ((2, 4), (1, 2)),
+}
+
+# Tier-1 suppliers whose names match these ship directly to every FAL
+# (buyer-furnished equipment), including custom FALs.
+DIRECT_TO_FAL_KEYWORDS = ("Engine Supplier", "Landing Gear Integrator")
 
 
 @dataclass
@@ -206,7 +224,7 @@ def build_airbus_network(seed: int = 42) -> nx.DiGraph:
 
     # Ensure every non-customer node has at least one outgoing edge and every
     # non-raw node at least one incoming edge, so flow can traverse the graph.
-    tier_order = ["raw", "tier2", "tier1", "plant", "fal", "customer"]
+    tier_order = TIER_ORDER
     for n, d in G.nodes(data=True):
         ti = tier_order.index(d["tier"])
         if d["tier"] != "customer" and G.out_degree(n) == 0:
@@ -221,10 +239,15 @@ def build_airbus_network(seed: int = 42) -> nx.DiGraph:
                            G.nodes[src]["prod_capacity"] * 0.6),
                        cost=2.0)
 
-    # Feasibility pass: every non-raw, non-customer node must be able to
-    # receive at least ~1.3x its production rate, or it is starved by
-    # construction rather than by disruption. Scale inbound transport
-    # capacities up where needed.
+    _ensure_inbound_feasibility(G)
+
+    return G
+
+
+def _ensure_inbound_feasibility(G: nx.DiGraph) -> None:
+    """Every non-raw, non-customer node must be able to receive at least
+    ~1.3x its production rate, or it is starved by construction rather than
+    by disruption. Scale inbound transport capacities up where needed."""
     for v, d in G.nodes(data=True):
         if d["tier"] in ("raw", "customer"):
             continue
@@ -236,7 +259,144 @@ def build_airbus_network(seed: int = 42) -> nx.DiGraph:
             for e in in_e:
                 G.edges[e]["transport_capacity"] *= k
 
-    return G
+
+def custom_node_rng(name: str) -> np.random.Generator:
+    """Per-node RNG seeded by the node name, so each custom node's wiring is
+    reproducible and independent of insertion order or the builder's seed."""
+    return np.random.default_rng(zlib.crc32(name.encode("utf-8")))
+
+
+def apply_custom_nodes(G: nx.DiGraph, custom_defs: list) -> None:
+    """Append user-defined nodes to a built network and wire them in.
+
+    Each def is a dict with: name, tier, region, prod_capacity,
+    storage_capacity, reliability, is_sole_source, and optional connection
+    overrides upstream / downstream / exclude_upstream / exclude_downstream
+    (lists of existing node names). Auto-wiring mirrors build_airbus_network:
+    inbound edges from the previous tier, outbound to the next, plus the
+    direct-to-FAL choke-point pattern for custom FALs. Ids continue from
+    G.number_of_nodes() in the order given.
+    """
+    names = {G.nodes[n]["name"]: n for n in G.nodes}
+
+    def _edge(rng, src, dst, lead_range, tcap_frac_range, cost_range):
+        if G.has_edge(src, dst):
+            return
+        G.add_edge(src, dst,
+                   lead_time=int(rng.integers(*lead_range)),
+                   transport_capacity=float(
+                       G.nodes[src]["prod_capacity"]
+                       * rng.uniform(*tcap_frac_range)),
+                   cost=float(rng.uniform(*cost_range)))
+
+    for spec in custom_defs:
+        name = spec["name"]
+        tier = spec["tier"]
+        ti = TIER_ORDER.index(tier)
+        rng = custom_node_rng(name)
+
+        if tier == "customer":
+            prod, stor, rel = 0.0, 1e9, 1.0
+        else:
+            prod = float(spec["prod_capacity"])
+            stor = float(spec["storage_capacity"])
+            rel = float(spec["reliability"])
+
+        i = G.number_of_nodes()
+        G.add_node(i, name=name, tier=tier, tier_idx=TIERS[tier],
+                   region=spec["region"], prod_capacity=prod,
+                   storage_capacity=stor, reliability=rel,
+                   is_sole_source=bool(spec.get("is_sole_source", False)),
+                   is_custom=True)
+        names[name] = i
+
+        by_tier = {t: [n for n, d in G.nodes(data=True)
+                       if d["tier"] == t and n != i]
+                   for t in TIERS}
+        excl_up = {names[x] for x in spec.get("exclude_upstream", [])
+                   if x in names}
+        excl_down = {names[x] for x in spec.get("exclude_downstream", [])
+                     if x in names}
+
+        # Inbound: same degree/lead/capacity recipe as connect().
+        if tier != "raw":
+            up_tier = TIER_ORDER[ti - 1]
+            deg_range, lead_range = TIER_WIRING[(up_tier, tier)]
+            cands = [n for n in by_tier[up_tier] if n not in excl_up]
+            if cands:
+                k = min(int(rng.integers(*deg_range)), len(cands))
+                for src in rng.choice(cands, size=k, replace=False):
+                    _edge(rng, int(src), i, lead_range, (0.4, 0.9), (1.0, 5.0))
+
+        # Custom FALs get the same buyer-furnished-equipment choke points.
+        if tier == "fal":
+            for t1 in by_tier["tier1"]:
+                if t1 in excl_up:
+                    continue
+                if any(k in G.nodes[t1]["name"]
+                       for k in DIRECT_TO_FAL_KEYWORDS):
+                    _edge(rng, t1, i, (2, 5), (0.3, 0.6), (3.0, 8.0))
+
+        # Outbound to the next tier.
+        if tier != "customer":
+            down_tier = TIER_ORDER[ti + 1]
+            deg_range, lead_range = TIER_WIRING[(tier, down_tier)]
+            cands = [n for n in by_tier[down_tier] if n not in excl_down]
+            if cands:
+                k = min(int(rng.integers(*deg_range)), len(cands))
+                for dst in rng.choice(cands, size=k, replace=False):
+                    _edge(rng, i, int(dst), lead_range, (0.4, 0.9), (1.0, 5.0))
+
+        # Manual overrides are additive on top of the auto-wiring.
+        for src_name in spec.get("upstream", []):
+            src = names.get(src_name)
+            if src is None or src == i:
+                continue
+            pair = (G.nodes[src]["tier"], tier)
+            _, lead_range = TIER_WIRING.get(pair, (None, (2, 5)))
+            frac = (0.3, 0.6) if pair not in TIER_WIRING else (0.4, 0.9)
+            _edge(rng, src, i, lead_range, frac, (1.0, 5.0))
+        for dst_name in spec.get("downstream", []):
+            dst = names.get(dst_name)
+            if dst is None or dst == i:
+                continue
+            pair = (tier, G.nodes[dst]["tier"])
+            _, lead_range = TIER_WIRING.get(pair, (None, (2, 5)))
+            frac = (0.3, 0.6) if pair not in TIER_WIRING else (0.4, 0.9)
+            _edge(rng, i, dst, lead_range, frac, (1.0, 5.0))
+
+        # Same connectivity repairs as the builder, for the new node only.
+        if tier != "customer" and G.out_degree(i) == 0:
+            cands = by_tier[TIER_ORDER[ti + 1]]
+            if cands:
+                dst = int(rng.choice(cands))
+                G.add_edge(i, dst, lead_time=int(rng.integers(1, 4)),
+                           transport_capacity=float(prod * 0.6), cost=2.0)
+        if tier != "raw" and G.in_degree(i) == 0:
+            cands = by_tier[TIER_ORDER[ti - 1]]
+            if cands:
+                src = int(rng.choice(cands))
+                G.add_edge(src, i, lead_time=int(rng.integers(1, 4)),
+                           transport_capacity=float(
+                               G.nodes[src]["prod_capacity"] * 0.6),
+                           cost=2.0)
+
+    if custom_defs:
+        _ensure_inbound_feasibility(G)
+
+
+def graph_fingerprint(G: nx.DiGraph) -> str:
+    """Stable id for the graph's membership + wiring; stored in model
+    checkpoints so a model trained on a different network is never loaded."""
+    h = hashlib.sha1()
+    for name in sorted(G.nodes[n]["name"] for n in G.nodes):
+        h.update(name.encode("utf-8"))
+        h.update(b"\x00")
+    for pair in sorted((G.nodes[u]["name"], G.nodes[v]["name"])
+                       for u, v in G.edges):
+        h.update("\x1f".join(pair).encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()[:16]
 
 
 def node_static_features(G: nx.DiGraph) -> np.ndarray:
